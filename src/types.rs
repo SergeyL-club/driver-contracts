@@ -12,7 +12,7 @@ pub struct AbiString(pub TypePtr, pub TypeSize);
 #[repr(C)]
 pub struct AbiStruct(pub TypePtr, pub TypeSize, pub TypeAlign);
 
-#[repr(C)]
+#[repr(C, u32)]
 #[allow(dead_code)]
 pub enum TypeBase {
     INT32,
