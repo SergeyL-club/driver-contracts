@@ -1,0 +1,14 @@
+language = "C"
+
+# Настройки для структур (убрали ошибочный derive_helper)
+[struct]
+rename_fields = "None"
+
+# Настройка стиля генерации для перечислений (вашего BaseType)
+[enum]
+rename_variants = "None"
+prefix_with_name = true 
+
+# Отключаем парсинг внешних зависимостей, смотрим только на ваш код
+[parse]
+parse_deps = false
