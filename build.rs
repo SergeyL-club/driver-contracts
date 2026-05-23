@@ -3,15 +3,21 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=");
 
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let profile = env::var("PROFILE").unwrap(); // "debug" или "release"
     let package_name = env::var("CARGO_PKG_NAME").unwrap();
+
+    // Определяем профиль сборки (debug или release) максимально надёжным способом
+    let profile = env::var("CARGO_BUILD_PROFILE")
+        .or_else(|_| env::var("PROFILE"))
+        .unwrap_or_else(|_| "debug".to_string());
+
+    // Говорим Cargo перезапускать build.rs, если изменился любой исходник или types/wrapper
+    println!("cargo:rerun-if-changed=src/");
 
     // 1. Создаем целевую папку target/finally
     let finally_dir = PathBuf::from(&crate_dir).join("target").join("finally");
-
     fs::create_dir_all(&finally_dir).expect("Не удалось создать директорию target/finally");
 
     // 2. ГЕНЕРАЦИЯ И ЗАПИСЬ .h ФАЙЛА В target/finally
@@ -20,17 +26,22 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(header_file);
 
-    // 3. ГЕНЕРАЦИЯ И ЗАПИСЬ wrapper.rs В target/finally
-    let mut wrapper_file = finally_dir.join("struct_builder_wrapper.rs");
-    let mut wrapper_code = include_str!("src/wrapper.rs");
-    fs::write(wrapper_file, wrapper_code).expect("Не удалось записать wrapper.rs");
+    // Ссылка на папку src для динамического чтения файлов
+    let src_dir = PathBuf::from(&crate_dir).join("src");
 
-    // 4. ГЕНЕРАЦИЯ И ЗАПИСЬ wrapper.rs В target/finally
-    wrapper_file = finally_dir.join("types-contract.rs");
-    wrapper_code = include_str!("src/types.rs");
-    fs::write(wrapper_file, wrapper_code).expect("Не удалось записать types.rs");
+    // 3. КОПИРОВАНИЕ wrapper.rs В target/finally
+    let wrapper_dest = finally_dir.join("struct_builder_wrapper.rs");
+    let wrapper_code = fs::read_to_string(src_dir.join("wrapper.rs"))
+        .expect("Не удалось прочитать src/wrapper.rs с диска");
+    fs::write(wrapper_dest, wrapper_code).expect("Не удалось записать wrapper.rs");
 
-    // 5. КОПИРОВАНИЕ ДИНАМИЧЕСКОЙ БИБЛИОТЕКИ В target/finally
+    // 4. КОПИРОВАНИЕ types.rs В target/finally
+    let types_dest = finally_dir.join("types-contract.rs");
+    let types_code = fs::read_to_string(src_dir.join("types.rs"))
+        .expect("Не удалось прочитать src/types.rs с диска");
+    fs::write(types_dest, types_code).expect("Не удалось записать types.rs");
+
+    // 5. КОПИРОВАНИЕ ДИНАМИЧЕСКОЙ БИБЛИОТЕКИ В target/finally (С поддержкой Debug/Release)
     let target_dir = PathBuf::from(&crate_dir).join("target").join(&profile);
 
     // Определяем имя бинарника под текущую ОС
@@ -50,11 +61,20 @@ fn main() {
     if src_binary.exists() {
         fs::copy(&src_binary, &dest_binary)
             .expect("Не удалось скопировать файл динамической библиотеки в target/finally");
-        println!("cargo:warning=🔥 Все артефакты ABI успешно собраны в папе target/finally!");
-    } else {
-        // На самом первом проходе сборки бинарника еще нет, предупреждаем пользователя
         println!(
-            "cargo:warning=⚠️ Библиотека компилируется. Запустите 'cargo build' повторно для копирования .so/.dll."
+            "cargo:warning=🔥 Все артефакты ABI успешно собраны в папке target/finally! Профиль: [{}]",
+            profile.to_uppercase()
+        );
+    } else {
+        // Выводим подсказку с учётом текущего профиля сборки, чтобы пользователь знал, какую команду повторить
+        println!(
+            "cargo:warning=⚠️ Библиотека [{}] ещё компилируется. Запустите 'cargo build{}' повторно для копирования бинарника.",
+            profile.to_uppercase(),
+            if profile == "release" {
+                " --release"
+            } else {
+                ""
+            }
         );
     }
 }
