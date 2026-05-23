@@ -1,5 +1,4 @@
-mod lib; // Импортируем типы контракта
-use lib::{AbiString, StructBuilder, TypeBase};
+use driver_contracts::{AbiString, StructBuilder, TypeBase};
 
 unsafe extern "C" {
     fn struct_builder_create(name: AbiString) -> *mut StructBuilder;
