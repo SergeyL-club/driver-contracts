@@ -17,6 +17,18 @@ pub struct SafeStructBuilder {
 }
 
 impl SafeStructBuilder {
+    pub fn into_raw(self) -> *mut StructBuilder {
+        let raw = self.raw;
+        std::mem::forget(self); // Отключаем деструктор Drop текущего плагина
+        raw
+    }
+
+    pub unsafe fn from_raw(raw: *mut StructBuilder) -> Self {
+        Self { raw }
+    }
+}
+
+impl SafeStructBuilder {
     pub fn new(name: &str) -> Option<Self> {
         let abi_str = AbiString(name.as_ptr(), name.len());
         let raw = unsafe { struct_builder_create(abi_str) };
