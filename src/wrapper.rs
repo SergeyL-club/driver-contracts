@@ -1,6 +1,6 @@
-use crate::{AbiString, StructBuilder, TypeBase}; // Импортируем типы контракта
+mod lib; // Импортируем типы контракта
+use lib::{AbiString, StructBuilder, TypeBase};
 
-// Связываем функции из скомпилированной динамической библиотеки
 unsafe extern "C" {
     fn struct_builder_create(name: AbiString) -> *mut StructBuilder;
     fn struct_builder_add_field(
@@ -13,13 +13,11 @@ unsafe extern "C" {
     fn struct_builder_destroy(builder: *mut StructBuilder);
 }
 
-/// Безопасная высокоуровневая обертка над StructBuilder для использования в Rust
 pub struct SafeStructBuilder {
     raw: *mut StructBuilder,
 }
 
 impl SafeStructBuilder {
-    /// Создает новый билдер
     pub fn new(name: &str) -> Option<Self> {
         let abi_str = AbiString(name.as_ptr(), name.len());
         let raw = unsafe { struct_builder_create(abi_str) };
@@ -30,24 +28,20 @@ impl SafeStructBuilder {
         }
     }
 
-    /// Добавляет поле
     pub fn add_field(&mut self, name: &str, field_type: TypeBase) {
         let abi_str = AbiString(name.as_ptr(), name.len());
         unsafe { struct_builder_add_field(self.raw, abi_str, field_type) };
     }
 
-    /// Удаляет поле
     pub fn remove_field(&mut self, name: &str) -> bool {
         let abi_str = AbiString(name.as_ptr(), name.len());
         unsafe { struct_builder_remove_field(self.raw, abi_str) }
     }
 
-    /// Очищает все поля
     pub fn clear_fields(&mut self) {
         unsafe { struct_builder_clear_fields(self.raw) };
     }
 
-    /// Дает безопасный доступ к текущему состоянию структуры (размер и выравнивание)
     pub fn get_layout(&self) -> (usize, usize) {
         unsafe {
             let b = &*self.raw;
@@ -56,7 +50,6 @@ impl SafeStructBuilder {
     }
 }
 
-// Автоматически уничтожает память в куче Rust-библиотеки при выходе из области видимости
 impl Drop for SafeStructBuilder {
     fn drop(&mut self) {
         unsafe { struct_builder_destroy(self.raw) };
