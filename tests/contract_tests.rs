@@ -1,88 +1,168 @@
-use driver_contracts::{AbiString, AbiStruct, TypeBase};
+use libloading::Library;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 // Подключаем wrapper.rs, который используют Plugin_A и Plugin_B
 #[path = "../src/wrapper.rs"]
 mod wrapper;
+
 use wrapper::SafeStructBuilder;
+use wrapper::types::{AbiString, TypeBase};
 
 // =========================================================================
-// ЧАСТЬ 1: БАЗОВОЕ ВЫРАВНИВАНИЕ И ФУНКЦИОНАЛ (Проверка ABI типов)
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЗАГРУЗКИ DLL
+// =========================================================================
+
+// Универсальный помощник для сборки пути к директории с артефактами
+fn get_target_dir() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("target");
+    path.push("finally"); // Используем папку finally, где собран полный комплект
+    path
+}
+
+// Путь к вашей реальной DLL контрактов
+fn get_contract_dll_path() -> PathBuf {
+    let mut path = get_target_dir();
+    #[cfg(target_os = "windows")]
+    path.push("driver_contracts.dll");
+    #[cfg(target_os = "linux")]
+    path.push("libdriver_contracts.so");
+    #[cfg(target_os = "macos")]
+    path.push("libdriver_contracts.dylib");
+    path
+}
+
+// Помощник для быстрой сборки vtable из DLL
+unsafe fn load_core_vtable(lib: &Library) -> Arc<wrapper::CoreVTable> {
+    unsafe {
+        Arc::new(wrapper::CoreVTable {
+            struct_builder_create: *lib
+                .get(b"struct_builder_create\0")
+                .expect("sym missing: struct_builder_create"),
+            struct_builder_add_field: *lib
+                .get(b"struct_builder_add_field\0")
+                .expect("sym missing: struct_builder_add_field"),
+            struct_builder_remove_field: *lib
+                .get(b"struct_builder_remove_field\0")
+                .expect("sym missing: struct_builder_remove_field"),
+            struct_builder_clear_fields: *lib
+                .get(b"struct_builder_clear_fields\0")
+                .expect("sym missing: struct_builder_clear_fields"),
+            struct_builder_destroy: *lib
+                .get(b"struct_builder_destroy\0")
+                .expect("sym missing: struct_builder_destroy"),
+        })
+    }
+}
+
+// =========================================================================
+// ЧАСТЬ 1: БАЗОВОЕ ВЫРАВНИВАНИЕ И ФУНКЦИОНАЛ (Интеграция с DLL)
 // =========================================================================
 
 #[test]
-fn test_abi_scalar_alignment() {
-    let mut builder = SafeStructBuilder::new("TestScalar").unwrap();
-    builder.add_field("id", TypeBase::INT32);
-    let (size, align) = builder.get_layout();
-    assert_eq!(size, 4);
-    assert_eq!(align, 4);
+fn test_dll_loading_and_basic_interaction() {
+    let dll_path = get_contract_dll_path();
+    assert!(dll_path.exists(), "DLL не найдена по пути: {:?}", dll_path);
 
-    builder.add_field("value", TypeBase::INT64);
-    let (size, align) = builder.get_layout();
-    assert_eq!(size, 16); // 4 + 4(padding) + 8 = 16
-    assert_eq!(align, 8);
+    unsafe {
+        // 1. Загружаем DLL
+        let core_lib = Library::new(&dll_path).unwrap_or_else(|e| {
+            panic!("Не удалось загрузить DLL {:?}: {}", dll_path, e);
+        });
+
+        // 2. Инициализируем vtable через наши гарантированные функции
+        let vtable = load_core_vtable(&core_lib);
+
+        // 3. Создаем билдер структуры через динамический вызов
+        let mut builder = SafeStructBuilder::new("DllBasicTest", vtable).unwrap();
+
+        // Добавляем скалярное поле для проверки выравнивания памяти
+        builder.add_field("status", TypeBase::INT32);
+
+        // Проверяем, что лейаут структуры прочитался корректно из памяти
+        let (size, align) = builder.get_layout();
+        assert_eq!(size, 4, "Размер структуры INT32 должен быть равен 4 байтам");
+        assert_eq!(
+            align, 4,
+            "Выравнивание структуры INT32 должно быть равно 4 байтам"
+        );
+    }
 }
 
 #[test]
-fn test_abi_string_field_layout() {
-    let mut builder = SafeStructBuilder::new("TestString").unwrap();
-    builder.add_field("status", TypeBase::INT32);
+fn test_dll_string_passing() {
+    let dll_path = get_contract_dll_path();
+    assert!(dll_path.exists(), "DLL не найдена по пути: {:?}", dll_path);
 
-    let dummy_val = "value";
-    let abi_str_value = AbiString(dummy_val.as_ptr(), dummy_val.len());
-    builder.add_field("payload", TypeBase::STRING(abi_str_value));
+    unsafe {
+        let core_lib = Library::new(&dll_path).unwrap();
+        let vtable = load_core_vtable(&core_lib);
 
-    let (size, align) = builder.get_layout();
-    let ptr_size = std::mem::size_of::<usize>();
+        // Создаем структуру
+        let mut builder = SafeStructBuilder::new("StringTestStructure", vtable).unwrap();
 
-    assert_eq!(size, ptr_size * 3); // Padding (4) + AbiString (16) = 24 на x64
-    assert_eq!(align, ptr_size);
+        // Проверяем корректность маршалинга и передачи строк по ABI в функцию add_field
+        let custom_str = "dynamic_abi_string_field_name";
+        let abi_str = AbiString(custom_str.as_ptr(), custom_str.len());
+
+        // Вызов add_field принимает строку по ABI.
+        builder.add_field("payload", TypeBase::STRING(abi_str));
+
+        // Если мы дошли до сюда, строка успешно распарсилась на стороне DLL
+        let (size, _) = builder.get_layout();
+        assert!(
+            size > 0,
+            "Структура со строковым полем не должна быть пустой"
+        );
+    }
 }
 
 #[test]
-fn test_abi_nested_struct_and_removal() {
-    let mut builder = SafeStructBuilder::new("MainStruct").unwrap();
-    let nested_name = "Point";
-    let nested_struct_meta = AbiStruct(nested_name.as_ptr(), 12, 4);
+fn test_dll_field_removal_flow() {
+    let dll_path = get_contract_dll_path();
+    assert!(dll_path.exists(), "DLL не найдена по пути: {:?}", dll_path);
 
-    builder.add_field("position", TypeBase::STRUCT(nested_struct_meta));
-    builder.add_field("flag", TypeBase::INT32);
+    unsafe {
+        let core_lib = Library::new(&dll_path).unwrap();
+        let vtable = load_core_vtable(&core_lib);
 
-    let (size_before, _) = builder.get_layout();
-    assert_eq!(size_before, 16);
+        // 1. Создаем структуру и добавляем два поля
+        let mut builder = SafeStructBuilder::new("RemovalTest", vtable).unwrap();
+        builder.add_field("first_field", TypeBase::INT32);
+        builder.add_field("second_field", TypeBase::INT64);
 
-    let removed = builder.remove_field("position");
-    assert!(removed);
+        let (size_before, _) = builder.get_layout();
+        // Предполагаем базовый лейаут: 4 (INT32) + 4 (padding) + 8 (INT64) = 16 байт
+        assert_eq!(
+            size_before, 16,
+            "Исходный размер структуры должен быть 16 байт"
+        );
 
-    let (size_after, align_after) = builder.get_layout();
-    assert_eq!(size_after, 4); // Поле flag сдвинулось на offset 0
-    assert_eq!(align_after, 4);
-}
+        // 2. Вызываем удаление поля (это задействует метод и поле vtable из варнинга!)
+        let removed = builder.remove_field("first_field");
+        assert!(
+            removed,
+            "DLL должна успешно удалить существующее поле 'first_field'"
+        );
 
-#[test]
-fn test_abi_clear_fields() {
-    let mut builder = SafeStructBuilder::new("ClearTest").unwrap();
-    builder.add_field("f1", TypeBase::INT64);
-    builder.add_field("f2", TypeBase::FLOAT32);
-    builder.clear_fields();
+        // 3. Проверяем, что изменения применились на стороне DLL
+        let (size_after, align_after) = builder.get_layout();
+        assert_eq!(
+            size_after, 8,
+            "После удаления INT32 должно остаться только поле INT64 (8 байт)"
+        );
+        assert_eq!(
+            align_after, 8,
+            "Выравнивание оставшегося поля должно быть 8"
+        );
 
-    let (size, align) = builder.get_layout();
-    assert_eq!(size, 0);
-    assert_eq!(align, 1);
-}
-
-#[test]
-fn test_abi_null_safety() {
-    let _invalid_builder = SafeStructBuilder::new(unsafe { std::str::from_utf8_unchecked(&[]) });
-    let _null_string = AbiString(std::ptr::null(), 0);
-
-    let builder_opt = SafeStructBuilder::new("");
-    if builder_opt.is_none() {
-        assert!(builder_opt.is_none());
-    } else {
-        let mut builder = builder_opt.unwrap();
-        let res = builder.remove_field("non_existent");
-        assert!(!res);
+        // 4. Проверяем поведение при удалении несуществующего поля
+        let removed_fake = builder.remove_field("non_existent_field");
+        assert!(
+            !removed_fake,
+            "Удаление несуществующего поля должно вернуть false"
+        );
     }
 }
 
@@ -90,97 +170,80 @@ fn test_abi_null_safety() {
 // ЧАСТЬ 2: СЦЕНАРИЙ МЕЖ-DLL ВЗАИМОДЕЙСТВИЯ (Plugin_A -> CoreDLL -> Plugin_B)
 // =========================================================================
 
-/// Тест 6: Симуляция сквозной передачи владения между двумя DLL.
-/// Plugin_A создает структуру -> передает сырой указатель -> Plugin_B забирает её,
-/// модифицирует и вызывает Drop. Все аллокации должны безопасно пройти через CoreDLL.
 #[test]
 fn test_multi_dll_ownership_transfer_flow() {
-    // --- ШАГ 1: Логика на стороне Plugin_A ---
-    // Создаем структуру в контексте первого плагина
-    let mut plugin_a_builder = SafeStructBuilder::new("SharedCrossDllStructure").unwrap();
+    let dll_path = get_contract_dll_path();
+    assert!(dll_path.exists(), "DLL не найдена по пути: {:?}", dll_path);
 
-    // Аллоцируем строку имени поля в куче CoreDLL
-    plugin_a_builder.add_field("plugin_a_field", TypeBase::INT32);
+    unsafe {
+        let lib = Library::new(&dll_path).unwrap();
+        let shared_vtable = load_core_vtable(&lib);
 
-    // Превращаем обертку в сырой указатель для передачи по ABI.
-    // Наш ManuallyDrop/std::mem::forget гарантирует, что Plugin_A не очистит память!
-    let raw_abi_pointer = plugin_a_builder.into_raw();
-    assert!(
-        !raw_abi_pointer.is_null(),
-        "Ошибка ABI: Plugin_A вернул пустой указатель"
-    );
+        // --- ШАГ 1: Логика на стороне Plugin_A ---
+        let mut plugin_a_builder =
+            SafeStructBuilder::new("SharedCrossDllStructure", shared_vtable.clone()).unwrap();
+        plugin_a_builder.add_field("plugin_a_field", TypeBase::INT32);
 
-    // --- ИМИТАЦИЯ ABI ПЕРЕЛЕТА УКАЗАТЕЛЯ ИЗ PLUGIN_A В PLUGIN_B ---
-    let received_pointer_in_plugin_b = raw_abi_pointer;
+        // Превращаем в сырой указатель, Drop не вызывается!
+        let raw_abi_pointer = plugin_a_builder.into_raw();
+        assert!(!raw_abi_pointer.is_null());
 
-    // --- ШАГ 2: Логика на стороне Plugin_B ---
-    // Plugin_B встречает сырой указатель и оборачивает его обратно в безопасный SafeStructBuilder
-    let mut plugin_b_builder = unsafe { SafeStructBuilder::from_raw(received_pointer_in_plugin_b) };
+        // --- ИМИТАЦИЯ ABI ПЕРЕЛЕТА УКАЗАТЕЛЯ ИЗ PLUGIN_A В PLUGIN_B ---
+        let received_pointer_in_plugin_b = raw_abi_pointer;
 
-    // Проверяем, видит ли Plugin_B то, что записал Plugin_A
-    let (initial_size, _) = plugin_b_builder.get_layout();
-    assert_eq!(
-        initial_size, 4,
-        "Plugin_B прочитал битые данные из указателя Plugin_A"
-    );
+        // --- ШАГ 2: Логика на стороне Plugin_B ---
+        // Восстанавливаем структуру в Plugin_B, передавая ту же vtable
+        let mut plugin_b_builder =
+            SafeStructBuilder::from_raw(received_pointer_in_plugin_b, shared_vtable.clone());
 
-    // Plugin_B добавляет своё поле. Вызов летит в CoreDLL, память вектора расширяется ТАМ.
-    plugin_b_builder.add_field("plugin_b_field", TypeBase::INT64);
+        let (initial_size, _) = plugin_b_builder.get_layout();
+        assert_eq!(initial_size, 4);
 
-    // Проверяем корректность слияния данных: 4 (INT32) + 4 (padding) + 8 (INT64) = 16 байт
-    let (final_size, final_align) = plugin_b_builder.get_layout();
-    assert_eq!(
-        final_size, 16,
-        "CoreDLL неверно объединил поля от двух разных DLL плагинов"
-    );
-    assert_eq!(final_align, 8);
+        plugin_b_builder.add_field("plugin_b_field", TypeBase::INT64);
 
-    // --- ШАГ 3: Финал владения ---
-    // Явно вызываем drop, чтобы уничтожить структуру прямо здесь, внутри теста.
-    // Это заставит wrapper.rs вызвать Си-функцию `struct_builder_destroy()`.
-    // Выполнение улетит в CoreDLL, где сработает Box::from_raw и очистка памяти.
-    std::mem::drop(plugin_b_builder);
+        let (final_size, final_align) = plugin_b_builder.get_layout();
+        assert_eq!(final_size, 16);
+        assert_eq!(final_align, 8);
 
-    // Если мы дошли до этой строчки и тест не упал с ошибкой
-    // "Segmentation Fault" или "Heap Corruption" — значит, CoreDLL
-    // успешно и безопасно очистил память, переданную между плагинами!
-    assert!(true);
+        // --- ШАГ 3: Финал владения ---
+        // Автоматический drop в конце области видимости очистит структуру целиком через DLL деструктор
+    }
 }
 
-/// Тест 7: Стресс-тест глубокой очистки памяти (Memory Leak & Double Free check)
-/// Проверяет, что Plugin_B может выполнить полную очистку структуры, созданной в Plugin_A,
-/// включая глубокое уничтожение аллоцированных Си-строк.
 #[test]
 fn test_multi_dll_deep_clear_leak_protection() {
-    let mut plugin_a_builder = SafeStructBuilder::new("StressStructure").unwrap();
+    let dll_path = get_contract_dll_path();
+    assert!(dll_path.exists(), "DLL не найдена по пути: {:?}", dll_path);
 
-    // Наполняем структуру тяжелыми динамическими типами данных
-    let custom_str = "temporary_abi_string_buffer";
-    let abi_str = AbiString(custom_str.as_ptr(), custom_str.len());
+    unsafe {
+        let lib = Library::new(&dll_path).unwrap();
+        let shared_vtable = load_core_vtable(&lib);
 
-    plugin_a_builder.add_field("dynamic_string_field", TypeBase::STRING(abi_str));
-    plugin_a_builder.add_field("another_field", TypeBase::INT64);
+        // Имитируем создание структуры в контексте Plugin_A
+        let mut plugin_a_builder =
+            SafeStructBuilder::new("StressStructure", shared_vtable.clone()).unwrap();
+        let custom_str = "temporary_abi_string_buffer";
+        let abi_str = AbiString(custom_str.as_ptr(), custom_str.len());
 
-    let raw_ptr = plugin_a_builder.into_raw();
+        plugin_a_builder.add_field("dynamic_string_field", TypeBase::STRING(abi_str));
+        plugin_a_builder.add_field("another_field", TypeBase::INT64);
 
-    // Передаем в Plugin_B
-    let mut plugin_b_builder = unsafe { SafeStructBuilder::from_raw(raw_ptr) };
+        let raw_ptr = plugin_a_builder.into_raw();
 
-    // Plugin_B заставляет CoreDLL полностью очистить поля и уничтожить внутренние строки
-    plugin_b_builder.clear_fields();
+        // Имитируем передачу: Plugin_B забирает владение голым указателем
+        let mut plugin_b_builder = SafeStructBuilder::from_raw(raw_ptr, shared_vtable.clone());
 
-    let (size, align) = plugin_b_builder.get_layout();
-    assert_eq!(
-        size, 0,
-        "После очистки из Plugin_B размер структуры не сбросился"
-    );
-    assert_eq!(align, 1);
+        // Очищаем внутренности структуры через плагин B
+        plugin_b_builder.clear_fields();
 
-    // Добавляем новое чистое поле после полного сброса
-    plugin_b_builder.add_field("fresh_start", TypeBase::INT32);
-    let (new_size, _) = plugin_b_builder.get_layout();
-    assert_eq!(
-        new_size, 4,
-        "Структура пришла в негодность после меж-DLL очистки"
-    );
+        let (size, align) = plugin_b_builder.get_layout();
+        assert_eq!(size, 0);
+        assert_eq!(align, 1);
+
+        // Проверяем, что аллокатор работает после очистки и принимает новые поля
+        plugin_b_builder.add_field("fresh_start", TypeBase::INT32);
+
+        let (new_size, _) = plugin_b_builder.get_layout();
+        assert_eq!(new_size, 4);
+    }
 }

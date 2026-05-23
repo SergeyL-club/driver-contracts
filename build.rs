@@ -21,11 +21,16 @@ fn main() {
         .write_to_file(header_file);
 
     // 3. ГЕНЕРАЦИЯ И ЗАПИСЬ wrapper.rs В target/finally
-    let wrapper_file = finally_dir.join("struct_builder_wrapper.rs");
-    let wrapper_code = include_str!("src/wrapper.rs");
+    let mut wrapper_file = finally_dir.join("struct_builder_wrapper.rs");
+    let mut wrapper_code = include_str!("src/wrapper.rs");
     fs::write(wrapper_file, wrapper_code).expect("Не удалось записать wrapper.rs");
 
-    // 4. КОПИРОВАНИЕ ДИНАМИЧЕСКОЙ БИБЛИОТЕКИ В target/finally
+    // 4. ГЕНЕРАЦИЯ И ЗАПИСЬ wrapper.rs В target/finally
+    wrapper_file = finally_dir.join("types-contract.rs");
+    wrapper_code = include_str!("src/types.rs");
+    fs::write(wrapper_file, wrapper_code).expect("Не удалось записать types.rs");
+
+    // 5. КОПИРОВАНИЕ ДИНАМИЧЕСКОЙ БИБЛИОТЕКИ В target/finally
     let target_dir = PathBuf::from(&crate_dir).join("target").join(&profile);
 
     // Определяем имя бинарника под текущую ОС
