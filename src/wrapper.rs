@@ -1,7 +1,7 @@
 use crate::{AbiString, StructBuilder, TypeBase}; // Импортируем типы контракта
 
 // Связываем функции из скомпилированной динамической библиотеки
-extern "C" {
+unsafe extern "C" {
     fn struct_builder_create(name: AbiString) -> *mut StructBuilder;
     fn struct_builder_add_field(
         builder: *mut StructBuilder,
